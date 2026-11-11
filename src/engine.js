@@ -1,12 +1,13 @@
 import { promotions } from './store.js';
 import { bestCombination } from './rules.js';
-import { reserveAtomic, release } from './budget.js';
+import { ALREADY_APPLIED, reserveAtomic, release } from './budget.js';
 
 // Prices a cart and reserves campaign budget for every promo applied.
 // If a promo's budget runs out mid-checkout, its siblings are released and the next best
 // combination without it is tried, so the customer still gets whatever is affordable.
-export async function checkout(db, cart, { reserve = reserveAtomic } = {}) {
-  const active = await promotions(db).find({ active: true }).toArray();
+// Pass orderId to make retries safe: the same order is charged against a budget at most once.
+export async function checkout(db, cart, { reserve = reserveAtomic, orderId } = {}) {
+  const active = await promotions(db).find({ active: true }, { projection: { appliedOrders: 0 } }).toArray();
   const excluded = new Set();
 
   for (;;) {
@@ -14,12 +15,16 @@ export async function checkout(db, cart, { reserve = reserveAtomic } = {}) {
     const reserved = [];
     let failed = null;
     for (const line of lines) {
-      const ok = line.promo.budgetCap == null || (await reserve(db, line.promo._id, line.amount));
+      if (line.promo.budgetCap == null) {
+        reserved.push(line);
+        continue;
+      }
+      const ok = await reserve(db, line.promo._id, line.amount, orderId);
       if (!ok) {
         failed = line;
         break;
       }
-      reserved.push(line);
+      reserved.push({ ...line, owned: ok !== ALREADY_APPLIED });
     }
 
     if (!failed) {
@@ -31,9 +36,7 @@ export async function checkout(db, cart, { reserve = reserveAtomic } = {}) {
       };
     }
 
-    await Promise.all(
-      reserved.filter((l) => l.promo.budgetCap != null).map((l) => release(db, l.promo._id, l.amount)),
-    );
+    await Promise.all(reserved.filter((l) => l.owned).map((l) => release(db, l.promo._id, l.amount, orderId)));
     excluded.add(String(failed.promo._id));
   }
 }

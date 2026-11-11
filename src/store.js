@@ -17,6 +17,7 @@ const validator = {
       budgetCap: money, // absent = uncapped
       budgetRemaining: money, // server rejects any write that would take it below zero
       version: { bsonType: ['int', 'long'] },
+      appliedOrders: { bsonType: 'array', items: { bsonType: 'string' } }, // orderIds already charged, for idempotent retries
     },
   },
 };
