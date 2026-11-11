@@ -13,7 +13,7 @@ before(async () => {
   await setup(db);
 });
 after(() => conn.close());
-beforeEach(() => promotions(db).deleteMany({}));
+beforeEach(() => Promise.all([promotions(db).deleteMany({}), db.collection('redemptions').deleteMany({})]));
 
 const remaining = async (id) => (await promotions(db).findOne({ _id: id })).budgetRemaining;
 const burst = (n, fn) => Promise.all(Array.from({ length: n }, fn));
@@ -60,4 +60,26 @@ test('checkout falls back to the next best combination when a budget runs out', 
   assert.deepEqual(second.lines.map((l) => l.name), ['10%', 'ship']);
   assert.equal(second.discount, 600 + 499);
   assert.equal(await remaining(flash._id), 0);
+});
+
+test('retrying checkout with the same orderId reserves budget once', async () => {
+  const p = await createPromotion(db, { name: '10%', type: 'percent_off', percent: 10, budgetCap: 10_000 });
+  const cart = { subtotal: 6000, deliveryFee: 0, isFirstOrder: false };
+
+  const first = await checkout(db, cart, { orderId: 'order-1' });
+  const retry = await checkout(db, cart, { orderId: 'order-1' }); // e.g. client timed out and resent
+
+  assert.deepEqual(retry.lines.map((l) => [l.name, l.amount]), [['10%', 600]]);
+  assert.equal(retry.total, first.total);
+  assert.equal(await remaining(p._id), 10_000 - 600);
+});
+
+test('50 concurrent duplicates of one order reserve budget once', async () => {
+  const p = await createPromotion(db, { name: '10%', type: 'percent_off', percent: 10, budgetCap: 10_000 });
+  const cart = { subtotal: 6000, deliveryFee: 0, isFirstOrder: false };
+
+  const results = await burst(50, () => checkout(db, cart, { orderId: 'order-2' }));
+
+  assert.ok(results.every((r) => r.discount === 600));
+  assert.equal(await remaining(p._id), 10_000 - 600);
 });
