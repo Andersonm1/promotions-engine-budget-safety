@@ -1,6 +1,6 @@
 import { promotions } from './store.js';
 import { bestCombination } from './rules.js';
-import { ALREADY_APPLIED, reserveAtomic, release } from './budget.js';
+import { reserveAtomic, release } from './budget.js';
 
 // Prices a cart and reserves campaign budget for every promo applied.
 // If a promo's budget runs out mid-checkout, its siblings are released and the next best
@@ -24,7 +24,8 @@ export async function checkout(db, cart, { reserve = reserveAtomic, orderId } = 
         failed = line;
         break;
       }
-      reserved.push({ ...line, owned: ok !== ALREADY_APPLIED });
+      // Never hand out more than this order was actually charged (a retry may carry an edited cart).
+      reserved.push(ok.alreadyCharged == null ? line : { ...line, amount: Math.min(line.amount, ok.alreadyCharged) });
     }
 
     if (!failed) {
@@ -36,7 +37,12 @@ export async function checkout(db, cart, { reserve = reserveAtomic, orderId } = 
       };
     }
 
-    await Promise.all(reserved.filter((l) => l.owned).map((l) => release(db, l.promo._id, l.amount, orderId)));
+    // An order's claims are shared by every in-flight copy of that order, so one copy rolling back
+    // could pull a claim its twin is about to return. With an orderId, keep them.
+    // shortcut: a kept claim the final combination doesn't use stays reserved (under-spend) until the order is cancelled.
+    if (orderId == null) {
+      await Promise.all(reserved.filter((l) => l.promo.budgetCap != null).map((l) => release(db, l.promo._id, l.amount)));
+    }
     excluded.add(String(failed.promo._id));
   }
 }

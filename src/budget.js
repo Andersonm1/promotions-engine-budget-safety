@@ -2,25 +2,27 @@ import { promotions } from './store.js';
 
 // Each strategy: (db, promoId, amount) => true if `amount` cents were reserved from the campaign budget.
 
-// Truthy, so callers that only check success still work; checkout uses it to avoid releasing a claim it doesn't own.
-export const ALREADY_APPLIED = 'already-applied';
-
 // Atomic conditional decrement: the check and the write happen inside one single-document
 // update on the server, so no two orders can both see the same remaining budget.
-// With an orderId, the order's claim is written in that same update: a retry can't charge twice,
-// and no crash can leave a claim without its budget taken.
-// shortcut: appliedOrders grows with every order (16 MB doc limit, ~500k orders); past that, move claims to a collection + transaction.
+// With an orderId, the order's claim (and what it was charged) is written in that same update:
+// a retry can't charge twice, and no crash can leave a claim without its budget taken.
+// Returns true, false, or { alreadyCharged: cents } when this order already holds a claim.
+// shortcut: appliedOrders grows with every order (16 MB doc limit, ~300k orders); past that, move claims to a collection + transaction.
 export async function reserveAtomic(db, id, amount, orderId) {
   const filter = { _id: id, budgetRemaining: { $gte: amount } };
   const update = { $inc: { budgetRemaining: -amount, version: 1 } };
   if (orderId != null) {
-    filter.appliedOrders = { $ne: orderId };
-    update.$push = { appliedOrders: orderId };
+    filter['appliedOrders.orderId'] = { $ne: orderId };
+    update.$push = { appliedOrders: { orderId, amount } };
   }
   const r = await promotions(db).updateOne(filter, update);
   if (r.modifiedCount === 1) return true;
   if (orderId == null) return false;
-  return (await promotions(db).countDocuments({ _id: id, appliedOrders: orderId })) ? ALREADY_APPLIED : false;
+  const prior = await promotions(db).findOne(
+    { _id: id, 'appliedOrders.orderId': orderId },
+    { projection: { 'appliedOrders.$': 1 } },
+  );
+  return prior ? { alreadyCharged: prior.appliedOrders[0].amount } : false;
 }
 
 // Optimistic locking: read the doc and its version, write only if the version is unchanged,
@@ -60,8 +62,8 @@ export async function release(db, id, amount, orderId) {
   const filter = { _id: id };
   const update = { $inc: { budgetRemaining: amount, version: 1 } };
   if (orderId != null) {
-    filter.appliedOrders = orderId;
-    update.$pull = { appliedOrders: orderId };
+    filter['appliedOrders.orderId'] = orderId;
+    update.$pull = { appliedOrders: { orderId } };
   }
   await promotions(db).updateOne(filter, update);
 }
