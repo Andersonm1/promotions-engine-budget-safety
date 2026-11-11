@@ -83,3 +83,57 @@ test('50 concurrent duplicates of one order reserve budget once', async () => {
   assert.ok(results.every((r) => r.discount === 600));
   assert.equal(await remaining(p._id), 10_000 - 600);
 });
+
+test('a retry with a bigger cart gets no more discount than was charged', async () => {
+  const p = await createPromotion(db, { name: '10%', type: 'percent_off', percent: 10, budgetCap: 10_000 });
+  const cart = (subtotal) => ({ subtotal, deliveryFee: 0, isFirstOrder: false });
+
+  await checkout(db, cart(6000), { orderId: 'order-3' });
+  const retry = await checkout(db, cart(20_000), { orderId: 'order-3' }); // same order id, edited cart
+
+  assert.equal(retry.discount, 600);
+  assert.equal(await remaining(p._id), 10_000 - 600);
+});
+
+// Deterministic replay of a race found by /review-budget: two copies of one order (A, B) are in flight;
+// A rolls back and frees X, another order takes X's budget, and B must not still hand out X.
+test('a duplicate request never returns a discount its twin rolled back', async () => {
+  const x = await createPromotion(db, { name: 'X', type: 'percent_off', percent: 10, stackGroup: 'a', budgetCap: 600 });
+  const y = await createPromotion(db, { name: 'Y', type: 'free_delivery', stackGroup: 'b', budgetCap: 0 });
+  const cart = { subtotal: 6000, deliveryFee: 499, isFirstOrder: false };
+  const isX = (id) => String(id) === String(x._id);
+  const gate = () => {
+    let open;
+    const p = new Promise((r) => (open = r));
+    return { p, open };
+  };
+  const aClaimedX = gate(), bSawX = gate(), yToppedUp = gate();
+  let aXCalls = 0, other;
+
+  const reserveA = async (d, id, amt, o) => {
+    if (isX(id) && ++aXCalls === 2) other = await checkout(db, cart, { orderId: 'other-order' });
+    const ok = await reserveAtomic(d, id, amt, o);
+    if (isX(id) && aXCalls === 1) {
+      aClaimedX.open();
+      await bSawX.p;
+    }
+    return ok;
+  };
+  const reserveB = async (d, id, amt, o) => {
+    if (isX(id)) await aClaimedX.p;
+    else await yToppedUp.p;
+    const ok = await reserveAtomic(d, id, amt, o);
+    if (isX(id)) bSawX.open();
+    return ok;
+  };
+
+  const a = checkout(db, cart, { orderId: 'dup', reserve: reserveA });
+  const b = checkout(db, cart, { orderId: 'dup', reserve: reserveB });
+  await a;
+  await promotions(db).updateOne({ _id: y._id }, { $inc: { budgetRemaining: 499 } });
+  yToppedUp.open();
+  const rb = await b;
+
+  const xGiven = [rb, other].flatMap((r) => r.lines).filter((l) => isX(l.promoId)).reduce((s, l) => s + l.amount, 0);
+  assert.ok(xGiven <= 600, `X handed out ${xGiven} cents against a 600 cent cap`);
+});
