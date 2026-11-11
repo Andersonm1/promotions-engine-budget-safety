@@ -129,19 +129,22 @@ affordable rather than an error.
 
 Pass `checkout(db, cart, { orderId: 'order-123' })` and a retried or duplicated request for the
 same order is charged against each budget at most once, even with 50 copies in flight at the same
-moment. The order id is pushed onto the promo's `appliedOrders` **in the same atomic update** that
-takes the budget, so there is no window where one has happened without the other.
+moment. The order id and the amount charged are pushed onto the promo's `appliedOrders` **in the
+same atomic update** that takes the budget, so there is no window where one has happened without
+the other. A retry never gets more discount than was charged, even if its cart was edited.
 
 ## Known limits
 
-- **`appliedOrders` grows with every order** on a capped promo (fine to roughly 500k orders per
+- **`appliedOrders` grows with every order** on a capped promo (fine to roughly 300k orders per
   campaign before the 16 MB document limit). Beyond that, move claims into their own collection
   and use a transaction.
 - **Idempotency covers the atomic strategy only**; `orderId` must be a string.
-- **A retry can pick a different combination** if other budgets changed between attempts. The
-  first claims are then kept as well (over-reserve, never overspend); use the latest response.
+- **With an `orderId`, claims are never rolled back mid-checkout.** If a promo is claimed but the
+  final combination doesn't use it (another budget ran out, or a retry picked a different
+  combination), it stays reserved until the order is cancelled: under-spend, never overspend.
 - **Release is the caller's job.** Call `release(db, promoId, amount, orderId)` when an order
-  fails or is cancelled. With an `orderId`, a double release refunds once.
+  fails or is cancelled. With an `orderId`, a double release refunds once, but the refund is the
+  `amount` the caller passes, not the stored one, so pass the amount from the checkout response.
 - **Partial budgets are refused**, not partially granted: $3 left and a $5 discount means no discount.
 - **One hot document per campaign.** Atomic `$inc` handles thousands of orders a second on one
   document. Far beyond that, split the budget into N shard documents and decrement a random one.

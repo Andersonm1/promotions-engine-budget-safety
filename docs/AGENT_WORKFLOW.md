@@ -31,6 +31,17 @@ rules, decided what "done" means, and pushed for a test-first workflow.
      actual: false, expected: true      (some copies got no discount: budget drained)
    ```
 4. **Green** (`17f21d5`): 14/14 tests pass, load test passes, test file untouched.
+5. **Review** (red `03e5e95`, green `90bd75e`): the human asked for `/review-budget` to be run on
+   the green commit. It found two overspend paths **in the agent's own fix**, both missed by the
+   passing tests:
+   - Claims were tracked per request, but they belong to the order. One copy of an order could
+     roll back and release a claim that its twin then returned as applied.
+   - A retry with an edited cart got the new discount while only the old amount was charged.
+
+   Both went through `/tdd` again. The first is replayed deterministically by gating the injected
+   `reserve` function, and failed with *"X handed out 1200 cents against a 600 cent cap"*. The
+   fix: store the charged amount in the claim, and never roll back claims for an order with an id.
+   16/16 tests pass.
 
 ## What the agent did well
 
@@ -55,6 +66,10 @@ rules, decided what "done" means, and pushed for a test-first workflow.
   forces a red commit before any code.
 - **Scope.** The agent shipped idempotency as a documented "known limit" rather than building it
   unasked. Building it was a human call.
+- **Green tests weren't enough.** The idempotency fix passed every test and the load test, and
+  still had two overspend bugs. They were found only because the human asked for the review step
+  to actually be run. Lesson kept in the setup: `/review-budget` after any change to
+  `src/budget.js` or `src/engine.js`, not only `/tdd`.
 - **Judgement calls it surfaced but didn't make:** refusing (not partially granting) a discount
   when the budget is short; the `appliedOrders` array's ~500k-orders-per-campaign ceiling; and
   over-reserving when a retry picks a different combination. All are in the README's known limits.
@@ -67,8 +82,11 @@ rules, decided what "done" means, and pushed for a test-first workflow.
   says was spent; atomic grants exactly the 200 orders that fit; naive *must* visibly overspend.
 - **A second environment:** GitHub Actions runs the tests and the load test on Linux, so it isn't
   only "works on my laptop".
-- **Interleavings walked before coding:** while designing the idempotency fix, the agent traced
-  crash ordering and concurrent duplicates by hand, the cases `/review-budget` now lists. That
-  showed a retried request must never release a claim it doesn't own, which is why `reserveAtomic`
-  returns `ALREADY_APPLIED` and checkout skips those lines when rolling back. `/review-budget` was
-  written from that pass; it hasn't yet been run as a separate review.
+- **Structured review after green:** `/review-budget` walks eight hazards: read-modify-write,
+  unguarded decrements, check-then-act, crash ordering, release paths, retries, floats, and
+  concurrent test coverage. On the idempotency commit it found the two bugs above, and it left one
+  low-severity item open: `release` refunds the caller's amount, not the stored one. That item is
+  documented in the README.
+- **Races turned into deterministic tests.** Instead of hoping a load test hits a rare
+  interleaving, the test injects a `reserve` function with gates that force the exact order of
+  events. It fails every time before the fix and passes every time after.

@@ -265,11 +265,17 @@ budget again. Build this one test-first (`/tdd` in `.claude/commands/` walks an 
    `orderId` leaves the budget charged once; 50 concurrent copies of one order are charged once and
    all get the discount. Run them and watch them fail: the retry leaves 8,800 instead of 9,400, and
    the 50 copies drain the budget so some get nothing. Commit.
-2. **Green.** In `reserveAtomic`, when an `orderId` is given, add `appliedOrders: { $ne: orderId }`
-   to the filter and `$push: { appliedOrders: orderId }` to the update. If nothing matched, check
-   whether the claim already exists and return a truthy `ALREADY_APPLIED` marker. In `checkout`,
-   pass `orderId` through and never release a line that came back `ALREADY_APPLIED`; that claim
-   belongs to the other request. Make `release` guarded by the claim and `$pull` it.
+2. **Green.** In `reserveAtomic`, when an `orderId` is given, add
+   `'appliedOrders.orderId': { $ne: orderId }` to the filter and
+   `$push: { appliedOrders: { orderId, amount } }` to the update. If nothing matched, look the
+   claim up and return `{ alreadyCharged: amount }`. In `checkout`, pass `orderId` through, cap
+   an already-charged line at the amount actually charged, and **don't release claims on
+   rollback when there is an `orderId`**. Make `release` guarded by the claim and `$pull` it.
+3. **Review.** Run `/review-budget` on the diff. On this repo it found two overspend paths in a
+   first version of step 2, each now covered by a test:
+   - A duplicate request rolled back and released a claim that its twin then returned. The test
+     replays that race deterministically by gating the injected `reserve` function.
+   - A retry with an edited cart got the new, bigger discount while only the old one was charged.
 
 Why not a separate `redemptions` collection with a unique index? Each concurrent duplicate would
 reserve budget first and only then hit the duplicate-key error. Fifty copies briefly hold fifty

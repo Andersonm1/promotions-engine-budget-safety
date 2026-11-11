@@ -33,8 +33,9 @@ scripts/loadtest.js  500-order concurrency proof
 3. **Money is integer cents.** Percentages floor. No floats for amounts.
 4. **Fail toward under-spending.** When a crash or retry could leave state ambiguous, the safe
    outcome is "budget reserved but unused", never "discount given but budget not taken".
-5. **Done means both pass:** `npm test` and `npm run loadtest`. Report the load-test table if
-   you touched `src/budget.js` or `src/engine.js`.
+5. **Done means both pass:** `npm test` and `npm run loadtest`. If you touched `src/budget.js`
+   or `src/engine.js`, also run `/review-budget` and report the load-test table. Passing tests
+   have already missed overspend bugs here once.
 
 ## Style
 
