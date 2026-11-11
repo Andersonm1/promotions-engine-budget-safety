@@ -125,20 +125,39 @@ If one reservation fails (its budget just ran out), the others from that attempt
 the next best combination without that promo is tried. The customer gets whatever is still
 affordable rather than an error.
 
+### Safe retries
+
+Pass `checkout(db, cart, { orderId: 'order-123' })` and a retried or duplicated request for the
+same order is charged against each budget at most once, even with 50 copies in flight at the same
+moment. The order id is pushed onto the promo's `appliedOrders` **in the same atomic update** that
+takes the budget, so there is no window where one has happened without the other.
+
 ## Known limits
 
-- **No idempotency key.** If an order service retries `checkout` after a timeout, budget can be
-  reserved twice. That errs on the safe side (under-spend, not overspend). Fix: a `redemptions`
-  collection with a unique index on `(orderId, promoId)` written in the same step.
-- **Release is the caller's job.** Call `release()` when an order fails or is cancelled.
+- **`appliedOrders` grows with every order** on a capped promo (fine to roughly 500k orders per
+  campaign before the 16 MB document limit). Beyond that, move claims into their own collection
+  and use a transaction.
+- **Idempotency covers the atomic strategy only**; `orderId` must be a string.
+- **A retry can pick a different combination** if other budgets changed between attempts. The
+  first claims are then kept as well (over-reserve, never overspend); use the latest response.
+- **Release is the caller's job.** Call `release(db, promoId, amount, orderId)` when an order
+  fails or is cancelled. With an `orderId`, a double release refunds once.
 - **Partial budgets are refused**, not partially granted: $3 left and a $5 discount means no discount.
 - **One hot document per campaign.** Atomic `$inc` handles thousands of orders a second on one
   document. Far beyond that, split the budget into N shard documents and decrement a random one.
 - No coupon codes, date windows or HTTP API: promos are auto-applied library calls.
 
+## Built with agents
+
+This repo was built with Claude Code, and the agent setup is committed so you can reuse it:
+[`AGENTS.md`](AGENTS.md) (rules for any agent; [`CLAUDE.md`](CLAUDE.md) imports it) and
+test-first slash commands in [`.claude/commands/`](.claude/commands). The red-then-green commits
+for safe retries came out of `/tdd`. [How the agent was used and checked](docs/AGENT_WORKFLOW.md).
+
 ## Docs
 
 - [Build guide](docs/BUILD_GUIDE.md): how to build this whole project from an empty folder, step by step.
+- [Agent workflow](docs/AGENT_WORKFLOW.md): what the agent did well, where a human stepped in, how its output was verified.
 
 ## License
 

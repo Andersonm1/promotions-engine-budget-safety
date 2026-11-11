@@ -256,10 +256,34 @@ git commit -m "Promotions engine with budget-safe campaign caps"
 gh repo create promotions-engine-budget-safety --public --source . --push
 ```
 
-## 10. Where to take it next
+## 10. Safe retries, built test-first
 
-- **Idempotency:** a `redemptions` collection with a unique index on `(orderId, promoId)`, so a
-  retried checkout cannot reserve twice.
+An order service that times out will resend the checkout. Without protection, each resend takes
+budget again. Build this one test-first (`/tdd` in `.claude/commands/` walks an agent through it):
+
+1. **Red.** Two tests in `test/budget.test.js`: a checkout followed by a retry with the same
+   `orderId` leaves the budget charged once; 50 concurrent copies of one order are charged once and
+   all get the discount. Run them and watch them fail: the retry leaves 8,800 instead of 9,400, and
+   the 50 copies drain the budget so some get nothing. Commit.
+2. **Green.** In `reserveAtomic`, when an `orderId` is given, add `appliedOrders: { $ne: orderId }`
+   to the filter and `$push: { appliedOrders: orderId }` to the update. If nothing matched, check
+   whether the claim already exists and return a truthy `ALREADY_APPLIED` marker. In `checkout`,
+   pass `orderId` through and never release a line that came back `ALREADY_APPLIED`; that claim
+   belongs to the other request. Make `release` guarded by the claim and `$pull` it.
+
+Why not a separate `redemptions` collection with a unique index? Each concurrent duplicate would
+reserve budget first and only then hit the duplicate-key error. Fifty copies briefly hold fifty
+times the discount, and on a small campaign that drains the cap and refuses real customers. Putting
+the claim in the same single-document update as the decrement removes that window.
+
+## 11. Agent setup
+
+Commit `AGENTS.md` (project rules for Codex and other agents), a one-line `CLAUDE.md` that imports
+it with `@AGENTS.md`, and reusable prompts in `.claude/commands/`. See
+[AGENT_WORKFLOW.md](AGENT_WORKFLOW.md).
+
+## 12. Where to take it next
+
 - **Coupon codes and date windows:** add `code`, `startsAt`, `endsAt` to the schema and filter in
   the `find` inside `checkout`.
 - **Extreme throughput:** split one campaign's budget across N shard documents and decrement a
